@@ -28,20 +28,20 @@ user_sessions = {}
 
 @bot.message_handler(commands=['start'])
 def send_welcome(m):
-    bot.reply_to(m, "🤖 ¡Bot multimedia seguro activo!\n\n1️⃣ Envía `/password <tu_clave>`\n2️⃣ Envía tus archivos (fotos, videos, documentos o notas circulares)\n3️⃣ Envía `/comprimir` para obtener tu ZIP protegido.")
+    bot.reply_to(m, "🤖 ¡Bot multimedia seguro activo!\n\n1️⃣ Envía `/password <tu_clave>`\n2️⃣ Envía tus archivos (fotos, videos, documentos o notas circulares)\n3️⃣ Envía `/comprimir` para obtener tu ZIP protegido.", parse_mode="Markdown")
 
 @bot.message_handler(commands=['password'])
 def set_password(m):
     uid = m.from_user.id
     args = m.text.split(maxsplit=1)
     if len(args) < 2:
-        return bot.reply_to(m, "❌ Indica la contraseña. Ejemplo: `/password mi_clave`")
+        return bot.reply_to(m, "❌ Indica la contraseña. Ejemplo: `/password mi_clave`", parse_mode="Markdown")
     
     if uid not in user_sessions:
         user_sessions[uid] = {"files": [], "password": "DefaultPassword123"}
     
     user_sessions[uid]["password"] = args[1]
-    bot.reply_to(m, "🔒 Contraseña guardada correctamente.\n\n📥 **Ahora puedes enviar los archivos** que deseas comprimir (fotos, videos, documentos o notas circulares).")
+    bot.reply_to(m, "🔒 Contraseña guardada correctamente.\n\n📥 *Ahora puedes enviar los archivos* que deseas comprimir (fotos, videos, documentos o notas circulares).", parse_mode="Markdown")
 
 # --- MANEJO BLINDADO DE ARCHIVOS ---
 @bot.message_handler(content_types=['document', 'photo', 'video', 'video_note'])
@@ -78,7 +78,8 @@ def handle_files(m):
             f.write(down)
         
         user_sessions[uid]["files"].append({"path": path, "name": original_name})
-        bot.reply_to(m, f"✅ Archivo añadido: `{original_name}`\n\nCuando termines de enviar todos tus archivos, escribe **`/comprimir`**.", parse_mode="Markdown")
+        # Sin parse_mode: nombres con _ o * rompían el Markdown de Telegram
+        bot.reply_to(m, f"✅ Archivo añadido: {original_name}\n\nCuando termines de enviar todos tus archivos, escribe /comprimir")
 
 @bot.message_handler(commands=['comprimir'])
 def compress_files(m):
@@ -92,9 +93,11 @@ def compress_files(m):
     bot.reply_to(m, "🗜️ Generando ZIP protegido con AES-256...")
     
     try:
-        # Se asegura que la estructura interna de pyzipper reciba strings limpios y válidos
-        with pyzipper.AESZipFile(zname, "w", compression=pyzipper.ZIP_DEFLATED, encryption="AES_256") as zf:
+        # CORRECCIÓN: pyzipper necesita la constante pyzipper.WZ_AES, no el texto "AES_256".
+        # Con un texto desconocido el cifrador quedaba en None y fallaba con 'update_zipinfo'.
+        with pyzipper.AESZipFile(zname, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zf:
             zf.setpassword(pwd.encode("utf-8"))
+            zf.setencryption(pyzipper.WZ_AES, nbits=256)  # AES-256 real
             for file_item in sess["files"]:
                 c_path = str(file_item["path"])
                 c_name = str(file_item["name"])
@@ -102,11 +105,11 @@ def compress_files(m):
                     zf.write(c_path, arcname=c_name)
                 
         with open(zname, "rb") as zf:
+            # Sin parse_mode: una contraseña con _ o * rompía el Markdown y el envío fallaba
             bot.send_document(
                 m.chat.id, 
                 zf, 
-                caption=f"🎉 **¡Tu archivo comprimido está listo!**\n\n🔒 Contraseña: `{pwd}`", 
-                parse_mode="Markdown"
+                caption=f"🎉 ¡Tu archivo comprimido está listo!\n\n🔒 Contraseña: {pwd}"
             )
     except Exception as e:
         bot.reply_to(m, f"❌ Error durante la compresión: {e}")
@@ -119,5 +122,5 @@ def compress_files(m):
         sess["files"] = []
 
 if __name__ == "__main__":
-    print("🤖 Bot iniciado correctamente...")
+    print("🤖 Bot iniciado correctamente en la nube...")
     bot.infinity_polling()
