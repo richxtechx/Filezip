@@ -26,8 +26,8 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN)
 user_sessions = {}
 
-# Límite Telegram: 50 MB
-TELEGRAM_MAX_SIZE = 50 * 1024 * 1024
+# Límite Telegram: 50 MB (usamos 48 MB como límite seguro)
+TELEGRAM_MAX_SIZE = 48 * 1024 * 1024  # 48 MB para margen de seguridad
 
 def format_size(bytes_size):
     """Convierte bytes a formato legible (MB, GB, etc)"""
@@ -37,11 +37,39 @@ def format_size(bytes_size):
         bytes_size /= 1024
     return f"{bytes_size:.2f} TB"
 
-def calculate_zip_count(total_size):
-    """Calcula cuántos ZIPs se necesitan"""
-    if total_size <= TELEGRAM_MAX_SIZE:
-        return 1
-    return (total_size // TELEGRAM_MAX_SIZE) + (1 if total_size % TELEGRAM_MAX_SIZE else 0)
+def divide_files_by_size(files_list, max_size_per_zip):
+    """
+    Divide archivos en grupos asegurando que cada grupo
+    no supere max_size_per_zip en tamaño acumulativo
+    """
+    groups = []
+    current_group = []
+    current_size = 0
+    
+    # Ordena por tamaño (más pequeños primero para mejor distribución)
+    sorted_files = sorted(files_list, key=lambda x: x["size"])
+    
+    for file_item in sorted_files:
+        file_size = file_item["size"]
+        
+        # Si el archivo individual es > max_size, error
+        if file_size > max_size_per_zip:
+            return None, f"❌ El archivo {file_item['name']} ({format_size(file_size)}) es demasiado grande. Máximo: {format_size(max_size_per_zip)}"
+        
+        # Si agregar este archivo supera el límite, crea un nuevo grupo
+        if current_size + file_size > max_size_per_zip and current_group:
+            groups.append(current_group)
+            current_group = []
+            current_size = 0
+        
+        current_group.append(file_item)
+        current_size += file_size
+    
+    # Agrega el último grupo
+    if current_group:
+        groups.append(current_group)
+    
+    return groups, None
 
 @bot.message_handler(commands=['start'])
 def send_welcome(m):
@@ -112,7 +140,10 @@ def list_files(m):
     
     sess = user_sessions[uid]
     total_size = sum(f["size"] for f in sess["files"])
-    num_zips = calculate_zip_count(total_size)
+    
+    # Calcula cuántos ZIPs se necesitan con la nueva lógica
+    groups, error = divide_files_by_size(sess["files"], TELEGRAM_MAX_SIZE)
+    num_zips = len(groups) if groups else 1
     
     msg = "📂 Archivos acumulados:\n\n"
     for i, file_item in enumerate(sess["files"], 1):
@@ -142,13 +173,21 @@ def compress_files(m):
         return bot.reply_to(m, "⚠️ No hay archivos acumulados para comprimir. Envía algunos primero.")
     
     sess = user_sessions[uid]
-    total_size = sum(f["size"] for f in sess["files"])
-    num_zips = calculate_zip_count(total_size)
+    files_list = sess["files"]
+    
+    # Divide archivos por tamaño acumulativo
+    groups, error = divide_files_by_size(files_list, TELEGRAM_MAX_SIZE)
+    
+    if error:
+        return bot.reply_to(m, error)
+    
+    num_zips = len(groups)
+    total_size = sum(f["size"] for f in files_list)
     
     # Marcar que estamos esperando el nombre del ZIP
     user_sessions[uid]["state"] = "waiting_for_zip_name"
     user_sessions[uid]["pending_compression"] = {
-        "files": sess["files"].copy(),
+        "groups": groups,
         "password": sess["password"],
         "total_size": total_size,
         "num_zips": num_zips
@@ -157,7 +196,7 @@ def compress_files(m):
     if num_zips == 1:
         msg = f"📦 Se creará 1 ZIP ({format_size(total_size)})\n\n"
     else:
-        msg = f"📦 Se crearán {num_zips} ZIPs de ~50MB cada uno\n\n"
+        msg = f"📦 Se crearán {num_zips} ZIPs de ~{format_size(TELEGRAM_MAX_SIZE)} cada uno\n\n"
     
     msg += "✍️ Escribe el nombre base para los ZIPs (sin .zip):\n\n"
     msg += "Ejemplo: `mis_archivos`\n\n"
@@ -187,20 +226,11 @@ def get_zip_name(m):
     
     try:
         pwd = pending["password"]
-        files_list = pending["files"]
+        groups = pending["groups"]
         num_zips = pending["num_zips"]
         
-        # Dividir archivos en grupos
-        files_per_zip = len(files_list) // num_zips
-        if len(files_list) % num_zips:
-            files_per_zip += 1
-        
         # Crear cada ZIP
-        for zip_num in range(1, num_zips + 1):
-            start_idx = (zip_num - 1) * files_per_zip
-            end_idx = start_idx + files_per_zip
-            chunk = files_list[start_idx:end_idx]
-            
+        for zip_num, group in enumerate(groups, 1):
             # Nombre del ZIP
             if num_zips == 1:
                 zip_name = f"{zip_base_name}.zip"
@@ -211,22 +241,26 @@ def get_zip_name(m):
             with pyzipper.AESZipFile(zip_name, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zf:
                 zf.setpassword(pwd.encode("utf-8"))
                 zf.setencryption(pyzipper.WZ_AES, nbits=256)
-                for file_item in chunk:
+                for file_item in group:
                     c_path = str(file_item["path"])
                     c_name = str(file_item["name"])
                     if os.path.exists(c_path):
                         zf.write(c_path, arcname=c_name)
             
-            # Validar tamaño
+            # Validar tamaño FINAL del ZIP
             zip_size = os.path.getsize(zip_name)
             if zip_size > TELEGRAM_MAX_SIZE:
                 os.remove(zip_name)
-                bot.reply_to(m, f"❌ {zip_name} es demasiado grande ({format_size(zip_size)}). Usa /limpiar y intenta con menos archivos.")
                 
-                # Limpiar pendiente
-                for file_item in files_list:
+                # Limpiar y avisar
+                for file_item in sum(groups, []):
                     if os.path.exists(file_item["path"]):
                         os.remove(file_item["path"])
+                
+                bot.reply_to(m, 
+                    f"❌ Error inesperado: {zip_name} es demasiado grande ({format_size(zip_size)}).\n\n"
+                    f"Esto no debería ocurrir. Intenta /limpiar y de nuevo con menos archivos."
+                )
                 sess["state"] = "idle"
                 sess["pending_compression"] = None
                 return
@@ -247,7 +281,7 @@ def get_zip_name(m):
             os.remove(zip_name)
         
         # Limpiar archivos temporales
-        for file_item in files_list:
+        for file_item in sum(groups, []):
             if os.path.exists(file_item["path"]):
                 os.remove(file_item["path"])
         
@@ -264,9 +298,12 @@ def get_zip_name(m):
         sess["pending_compression"] = None
         
         # Limpiar archivos temporales
-        for file_item in files_list:
-            if os.path.exists(file_item["path"]):
-                os.remove(file_item["path"])
+        try:
+            for file_item in sum(pending["groups"], []):
+                if os.path.exists(file_item["path"]):
+                    os.remove(file_item["path"])
+        except:
+            pass
 
 @bot.message_handler(func=lambda m: True)
 def handle_other_messages(m):
