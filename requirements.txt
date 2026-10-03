@@ -1,2 +1,3 @@
-pyTelegramBotAPI
-pyzipper
+# telebot
+# pyzipper
+# requests
