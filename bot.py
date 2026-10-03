@@ -26,6 +26,17 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN)
 user_sessions = {}
 
+# Límite de Telegram: 50 MB en la API de Bot
+TELEGRAM_MAX_SIZE = 50 * 1024 * 1024  # 50 MB
+
+def format_size(bytes_size):
+    """Convierte bytes a formato legible (MB, GB, etc)"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if bytes_size < 1024:
+            return f"{bytes_size:.2f} {unit}"
+        bytes_size /= 1024
+    return f"{bytes_size:.2f} TB"
+
 @bot.message_handler(commands=['start'])
 def send_welcome(m):
     bot.reply_to(m, "🤖 ¡Bot multimedia seguro activo!\n\n1️⃣ Envía `/password <tu_clave>`\n2️⃣ Envía tus archivos (fotos, videos, documentos o notas circulares)\n3️⃣ Envía `/comprimir` para obtener tu ZIP protegido.", parse_mode="Markdown")
@@ -52,19 +63,24 @@ def handle_files(m):
     
     f_info = None
     original_name = None
+    file_size = None
     
     if m.document:
         f_info = bot.get_file(m.document.file_id)
         original_name = m.document.file_name
+        file_size = m.document.file_size
     elif m.photo:
         f_info = bot.get_file(m.photo[-1].file_id)
         original_name = f"foto_{m.photo[-1].file_unique_id}.jpg"
+        file_size = m.photo[-1].file_size
     elif m.video:
         f_info = bot.get_file(m.video.file_id)
         original_name = m.video.file_name or f"video_{m.video.file_unique_id}.mp4"
+        file_size = m.video.file_size
     elif m.video_note:
         f_info = bot.get_file(m.video_note.file_id)
         original_name = f"nota_circular_{m.video_note.file_unique_id}.mp4"
+        file_size = m.video_note.file_size
 
     if f_info:
         # Fallback estricto por si el nombre viene nulo de la API de Telegram
@@ -77,9 +93,40 @@ def handle_files(m):
         with open(path, "wb") as f:
             f.write(down)
         
-        user_sessions[uid]["files"].append({"path": path, "name": original_name})
-        # Sin parse_mode: nombres con _ o * rompían el Markdown de Telegram
-        bot.reply_to(m, f"✅ Archivo añadido: {original_name}\n\nCuando termines de enviar todos tus archivos, escribe /comprimir")
+        actual_size = os.path.getsize(path)
+        user_sessions[uid]["files"].append({"path": path, "name": original_name, "size": actual_size})
+        
+        size_display = format_size(actual_size) if file_size is None else format_size(file_size)
+        bot.reply_to(m, f"✅ Archivo añadido: {original_name} ({size_display})\n\nCuando termines de enviar todos tus archivos, escribe /comprimir")
+
+@bot.message_handler(commands=['listar'])
+def list_files(m):
+    uid = m.from_user.id
+    if uid not in user_sessions or not user_sessions[uid]["files"]:
+        return bot.reply_to(m, "📭 No hay archivos acumulados.")
+    
+    sess = user_sessions[uid]
+    total_size = sum(f["size"] for f in sess["files"])
+    
+    msg = "📂 Archivos acumulados:\n\n"
+    for i, file_item in enumerate(sess["files"], 1):
+        msg += f"{i}. {file_item['name']} ({format_size(file_item['size'])})\n"
+    
+    msg += f"\nTamaño total: {format_size(total_size)}"
+    bot.reply_to(m, msg)
+
+@bot.message_handler(commands=['limpiar'])
+def clear_files(m):
+    uid = m.from_user.id
+    if uid not in user_sessions or not user_sessions[uid]["files"]:
+        return bot.reply_to(m, "📭 No hay archivos para limpiar.")
+    
+    sess = user_sessions[uid]
+    for file_item in sess["files"]:
+        if os.path.exists(file_item["path"]):
+            os.remove(file_item["path"])
+    sess["files"] = []
+    bot.reply_to(m, "✅ Archivos limpios. Puedes comenzar de nuevo.")
 
 @bot.message_handler(commands=['comprimir'])
 def compress_files(m):
@@ -88,28 +135,56 @@ def compress_files(m):
         return bot.reply_to(m, "⚠️ No hay archivos acumulados para comprimir. Envía algunos primero.")
     
     sess = user_sessions[uid]
+    
+    # Calcular tamaño total ANTES de comprimir
+    total_size = sum(f["size"] for f in sess["files"])
+    
+    # Validación: si el tamaño total YA supera 45 MB, avisar
+    # (dejamos 5 MB de margen porque la compresión rara vez reduce mucho videos/fotos)
+    if total_size > 45 * 1024 * 1024:
+        size_display = format_size(total_size)
+        bot.reply_to(m, 
+            f"⚠️ DEMASIADO GRANDE\n\n"
+            f"Tamaño total de archivos: {size_display}\n"
+            f"Límite de Telegram: 50 MB\n\n"
+            f"Soluciones:\n"
+            f"1. Usa /limpiar y envía menos archivos\n"
+            f"2. Usa /listar para ver el tamaño de cada uno\n"
+            f"3. Elimina los archivos más pesados"
+        )
+        return
+    
     zname = f"archivo_protegido_{uid}.zip"
     pwd = sess["password"]
     bot.reply_to(m, "🗜️ Generando ZIP protegido con AES-256...")
     
     try:
-        # CORRECCIÓN: pyzipper necesita la constante pyzipper.WZ_AES, no el texto "AES_256".
-        # Con un texto desconocido el cifrador quedaba en None y fallaba con 'update_zipinfo'.
         with pyzipper.AESZipFile(zname, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zf:
             zf.setpassword(pwd.encode("utf-8"))
-            zf.setencryption(pyzipper.WZ_AES, nbits=256)  # AES-256 real
+            zf.setencryption(pyzipper.WZ_AES, nbits=256)
             for file_item in sess["files"]:
                 c_path = str(file_item["path"])
                 c_name = str(file_item["name"])
                 if os.path.exists(c_path):
                     zf.write(c_path, arcname=c_name)
-                
+        
+        # Validar tamaño del ZIP ANTES de intentar enviarlo
+        zip_size = os.path.getsize(zname)
+        if zip_size > TELEGRAM_MAX_SIZE:
+            size_display = format_size(zip_size)
+            os.remove(zname)
+            bot.reply_to(m, 
+                f"❌ El ZIP es demasiado grande ({size_display})\n\n"
+                f"Límite de Telegram: {format_size(TELEGRAM_MAX_SIZE)}\n\n"
+                f"Usa /limpiar y envía menos archivos."
+            )
+            return
+        
         with open(zname, "rb") as zf:
-            # Sin parse_mode: una contraseña con _ o * rompía el Markdown y el envío fallaba
             bot.send_document(
                 m.chat.id, 
                 zf, 
-                caption=f"🎉 ¡Tu archivo comprimido está listo!\n\n🔒 Contraseña: {pwd}"
+                caption=f"🎉 ¡Tu archivo comprimido está listo!\n\n🔒 Contraseña: {pwd}\n\n📦 Tamaño: {format_size(zip_size)}"
             )
     except Exception as e:
         bot.reply_to(m, f"❌ Error durante la compresión: {e}")
