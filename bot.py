@@ -18,7 +18,7 @@ def run_web_server():
 
 threading.Thread(target=run_web_server, daemon=True).start()
 
-# --- LÓGICA DEL BOT (Lee el token de las variables de entorno de Render) ---
+# --- LÓGICA DEL BOT ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("❌ No se encontró la variable de entorno TELEGRAM_TOKEN")
@@ -28,7 +28,7 @@ user_sessions = {}
 
 @bot.message_handler(commands=['start'])
 def send_welcome(m):
-    bot.reply_to(m, "🤖 ¡Bot seguro en la nube activo!\n\n• Envía `/password <tu_clave>`\n• Envía tus archivos\n• Envía `/comprimir`")
+    bot.reply_to(m, "🤖 ¡Bot multimedia activo!\n\n• Envía `/password <tu_clave>`\n• Envía fotos, videos o notas circulares\n• Envía `/comprimir` para crear tu ZIP protegido.")
 
 @bot.message_handler(commands=['password'])
 def set_password(m):
@@ -41,12 +41,15 @@ def set_password(m):
     user_sessions[uid]["password"] = args[1]
     bot.reply_to(m, "🔒 Contraseña guardada correctamente.")
 
-@bot.message_handler(content_types=['document', 'photo', 'video'])
+# --- MANEJO DE TODOS LOS FORMATOS (Incluyendo Notas Circulares) ---
+@bot.message_handler(content_types=['document', 'photo', 'video', 'video_note'])
 def handle_files(m):
     uid = m.from_user.id
     if uid not in user_sessions:
         user_sessions[uid] = {"files": [], "password": "DefaultPassword123"}
+    
     f_info, f_name = None, ""
+    
     if m.document:
         f_info = bot.get_file(m.document.file_id)
         f_name = m.document.file_name
@@ -56,13 +59,17 @@ def handle_files(m):
     elif m.video:
         f_info = bot.get_file(m.video.file_id)
         f_name = m.video.file_name or f"video_{m.video.file_unique_id}.mp4"
+    elif m.video_note:  # <--- Soporte para notas circulares de video
+        f_info = bot.get_file(m.video_note.file_id)
+        f_name = f"nota_circular_{m.video_note.file_unique_id}.mp4"
+
     if f_info:
         down = bot.download_file(f_info.file_path)
         path = f"temp_{uid}_{f_name}"
         with open(path, "wb") as f:
             f.write(down)
         user_sessions[uid]["files"].append(path)
-        bot.reply_to(m, f"📥 Archivo añadido: `{f_name}`", parse_mode="Markdown")
+        bot.reply_to(m, f"📥 Archivo añadido al lote: `{f_name}`", parse_mode="Markdown")
 
 @bot.message_handler(commands=['comprimir'])
 def compress_files(m):
@@ -72,7 +79,7 @@ def compress_files(m):
     sess = user_sessions[uid]
     zname = f"archivo_protegido_{uid}.zip"
     pwd = sess["password"]
-    bot.reply_to(m, "🗜️ Generando ZIP protegido...")
+    bot.reply_to(m, "🗜️ Generando ZIP protegido con AES-256...")
     try:
         with pyzipper.AESZipFile(zname, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES_256) as zf:
             zf.setpassword(pwd.encode("utf-8"))
@@ -89,5 +96,5 @@ def compress_files(m):
         sess["files"] = []
 
 if __name__ == "__main__":
-    print("🤖 Bot iniciado de forma segura...")
+    print("🤖 Bot iniciado y listo para recibir videos y notas circulares...")
     bot.infinity_polling()
