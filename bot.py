@@ -28,7 +28,7 @@ user_sessions = {}
 
 @bot.message_handler(commands=['start'])
 def send_welcome(m):
-    bot.reply_to(m, "🤖 ¡Bot multimedia activo!\n\n• Envía `/password <tu_clave>`\n• Envía fotos, videos o notas circulares\n• Envía `/comprimir` para crear tu ZIP protegido.")
+    bot.reply_to(m, "🤖 ¡Bot multimedia seguro activo!\n\n• Envía `/password <tu_clave>` para la contraseña.\n• Envía fotos, videos o notas circulares.\n• Envía `/comprimir` para crear tu ZIP protegido.")
 
 @bot.message_handler(commands=['password'])
 def set_password(m):
@@ -59,7 +59,7 @@ def handle_files(m):
     elif m.video:
         f_info = bot.get_file(m.video.file_id)
         f_name = m.video.file_name or f"video_{m.video.file_unique_id}.mp4"
-    elif m.video_note:  # <--- Soporte para notas circulares de video
+    elif m.video_note:
         f_info = bot.get_file(m.video_note.file_id)
         f_name = f"nota_circular_{m.video_note.file_unique_id}.mp4"
 
@@ -81,7 +81,7 @@ def compress_files(m):
     pwd = sess["password"]
     bot.reply_to(m, "🗜️ Generando ZIP protegido con AES-256...")
     try:
-        with pyzipper.AESZipFile(zname, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES_256) as zf:
+        with pyzipper.AESZipFile(zname, "w", compression=pyzipper.ZIP_DEFLATED, encryption="AES_256") as zf:
             zf.setpassword(pwd.encode("utf-8"))
             for p in sess["files"]:
                 zf.write(p, arcname=p.split("_", 2)[-1])
@@ -96,5 +96,5 @@ def compress_files(m):
         sess["files"] = []
 
 if __name__ == "__main__":
-    print("🤖 Bot iniciado y listo para recibir videos y notas circulares...")
+    print("🤖 Bot iniciado correctamente en la nube...")
     bot.infinity_polling()
