@@ -41,10 +41,9 @@ def set_password(m):
         user_sessions[uid] = {"files": [], "password": "DefaultPassword123"}
     
     user_sessions[uid]["password"] = args[1]
-    # Mensaje exacto solicitado
     bot.reply_to(m, "🔒 Contraseña guardada correctamente.\n\n📥 **Ahora puedes enviar los archivos** que deseas comprimir (fotos, videos, documentos o notas circulares).")
 
-# --- MANEJO SEGURO DE ARCHIVOS Y FORMATOS ---
+# --- MANEJO BLINDADO DE ARCHIVOS ---
 @bot.message_handler(content_types=['document', 'photo', 'video', 'video_note'])
 def handle_files(m):
     uid = m.from_user.id
@@ -52,36 +51,34 @@ def handle_files(m):
         user_sessions[uid] = {"files": [], "password": "DefaultPassword123"}
     
     f_info = None
-    f_name = f"archivo_{m.message_id}"
+    original_name = None
     
     if m.document:
         f_info = bot.get_file(m.document.file_id)
-        if m.document.file_name:
-            f_name = m.document.file_name
+        original_name = m.document.file_name
     elif m.photo:
         f_info = bot.get_file(m.photo[-1].file_id)
-        f_name = f"foto_{m.photo[-1].file_unique_id}.jpg"
+        original_name = f"foto_{m.photo[-1].file_unique_id}.jpg"
     elif m.video:
         f_info = bot.get_file(m.video.file_id)
-        if m.video.file_name:
-            f_name = m.video.file_name
-        else:
-            f_name = f"video_{m.video.file_unique_id}.mp4"
+        original_name = m.video.file_name or f"video_{m.video.file_unique_id}.mp4"
     elif m.video_note:
         f_info = bot.get_file(m.video_note.file_id)
-        f_name = f"nota_circular_{m.video_note.file_unique_id}.mp4"
+        original_name = f"nota_circular_{m.video_note.file_unique_id}.mp4"
 
-    if f_info and f_info.file_path:
+    if f_info:
+        # Fallback estricto por si el nombre viene nulo de la API de Telegram
+        if not original_name or not isinstance(original_name, str):
+            original_name = f"archivo_{m.message_id}.bin"
+            
         down = bot.download_file(f_info.file_path)
-        safe_name = str(f_name)
-        path = f"temp_{uid}_{safe_name}"
+        path = f"temp_{uid}_{m.message_id}_{original_name}"
         
         with open(path, "wb") as f:
             f.write(down)
         
-        user_sessions[uid]["files"].append({"path": path, "name": safe_name})
-        # Mensaje orientativo tras recibir cada archivo
-        bot.reply_to(m, f"✅ Archivo añadido: `{safe_name}`\n\nCuando termines de enviar todos tus archivos, escribe **`/comprimir`**.", parse_mode="Markdown")
+        user_sessions[uid]["files"].append({"path": path, "name": original_name})
+        bot.reply_to(m, f"✅ Archivo añadido: `{original_name}`\n\nCuando termines de enviar todos tus archivos, escribe **`/comprimir`**.", parse_mode="Markdown")
 
 @bot.message_handler(commands=['comprimir'])
 def compress_files(m):
@@ -95,7 +92,7 @@ def compress_files(m):
     bot.reply_to(m, "🗜️ Generando ZIP protegido con AES-256...")
     
     try:
-        # Se usa string "AES_256" para evitar errores de atributos en pyzipper
+        # Se asegura que la estructura interna de pyzipper reciba strings limpios y válidos
         with pyzipper.AESZipFile(zname, "w", compression=pyzipper.ZIP_DEFLATED, encryption="AES_256") as zf:
             zf.setpassword(pwd.encode("utf-8"))
             for file_item in sess["files"]:
@@ -105,7 +102,6 @@ def compress_files(m):
                     zf.write(c_path, arcname=c_name)
                 
         with open(zname, "rb") as zf:
-            # Mensaje exacto de que está listo
             bot.send_document(
                 m.chat.id, 
                 zf, 
@@ -115,7 +111,6 @@ def compress_files(m):
     except Exception as e:
         bot.reply_to(m, f"❌ Error durante la compresión: {e}")
     finally:
-        # Limpieza de archivos temporales del servidor
         for file_item in sess["files"]:
             if os.path.exists(file_item["path"]):
                 os.remove(file_item["path"])
@@ -124,5 +119,5 @@ def compress_files(m):
         sess["files"] = []
 
 if __name__ == "__main__":
-    print("🤖 Bot iniciado correctamente en la nube...")
+    print("🤖 Bot iniciado correctamente...")
     bot.infinity_polling()
