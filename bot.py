@@ -28,7 +28,7 @@ user_sessions = {}
 
 @bot.message_handler(commands=['start'])
 def send_welcome(m):
-    bot.reply_to(m, "🤖 ¡Bot multimedia seguro activo!\n\n• Envía `/password <tu_clave>` para la contraseña.\n• Envía fotos, videos o notas circulares.\n• Envía `/comprimir` para crear tu ZIP protegido.")
+    bot.reply_to(m, "🤖 ¡Bot multimedia seguro activo!\n\n• Envía `/password <tu_clave>` para la contraseña.\n• Envía fotos, videos, documentos o notas circulares.\n• Envía `/comprimir` para crear tu ZIP protegido.")
 
 @bot.message_handler(commands=['password'])
 def set_password(m):
@@ -41,7 +41,7 @@ def set_password(m):
     user_sessions[uid]["password"] = args[1]
     bot.reply_to(m, "🔒 Contraseña guardada correctamente.")
 
-# --- MANEJO DE TODOS LOS FORMATOS (Incluyendo Notas Circulares) ---
+# --- MANEJO ROBUSTO DE ARCHIVOS ---
 @bot.message_handler(content_types=['document', 'photo', 'video', 'video_note'])
 def handle_files(m):
     uid = m.from_user.id
@@ -52,7 +52,7 @@ def handle_files(m):
     
     if m.document:
         f_info = bot.get_file(m.document.file_id)
-        f_name = m.document.file_name
+        f_name = m.document.file_name or f"documento_{m.document.file_unique_id}"
     elif m.photo:
         f_info = bot.get_file(m.photo[-1].file_id)
         f_name = f"foto_{m.photo[-1].file_unique_id}.jpg"
@@ -68,7 +68,9 @@ def handle_files(m):
         path = f"temp_{uid}_{f_name}"
         with open(path, "wb") as f:
             f.write(down)
-        user_sessions[uid]["files"].append(path)
+        
+        # Guardamos como objeto estructurado para evitar errores de nombres nulos
+        user_sessions[uid]["files"].append({"path": path, "name": f_name})
         bot.reply_to(m, f"📥 Archivo añadido al lote: `{f_name}`", parse_mode="Markdown")
 
 @bot.message_handler(commands=['comprimir'])
@@ -76,23 +78,30 @@ def compress_files(m):
     uid = m.from_user.id
     if uid not in user_sessions or not user_sessions[uid]["files"]:
         return bot.reply_to(m, "⚠️ No hay archivos acumulados.")
+    
     sess = user_sessions[uid]
     zname = f"archivo_protegido_{uid}.zip"
     pwd = sess["password"]
     bot.reply_to(m, "🗜️ Generando ZIP protegido con AES-256...")
+    
     try:
         with pyzipper.AESZipFile(zname, "w", compression=pyzipper.ZIP_DEFLATED, encryption="AES_256") as zf:
             zf.setpassword(pwd.encode("utf-8"))
-            for p in sess["files"]:
-                zf.write(p, arcname=p.split("_", 2)[-1])
+            for file_item in sess["files"]:
+                # Añade el archivo usando su nombre limpio guardado previamente
+                zf.write(file_item["path"], arcname=file_item["name"])
+                
         with open(zname, "rb") as zf:
             bot.send_document(m.chat.id, zf, caption=f"🔒 ¡Lote comprimido!\nContraseña: `{pwd}`", parse_mode="Markdown")
     except Exception as e:
         bot.reply_to(m, f"❌ Error: {e}")
     finally:
-        for p in sess["files"]:
-            if os.path.exists(p): os.remove(p)
-        if os.path.exists(zname): os.remove(zname)
+        # Limpieza de archivos temporales
+        for file_item in sess["files"]:
+            if os.path.exists(file_item["path"]):
+                os.remove(file_item["path"])
+        if os.path.exists(zname):
+            os.remove(zname)
         sess["files"] = []
 
 if __name__ == "__main__":
